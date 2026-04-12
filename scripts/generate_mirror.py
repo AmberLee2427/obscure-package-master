@@ -135,16 +135,23 @@ def _get_site_packages_candidates():
 
     # 2. Common virtualenv directory names in the current working directory
     for venv_name in (".venv", "venv", "env", ".env"):
-        lib_path = os.path.join(os.getcwd(), venv_name, "lib")
-        if not os.path.isdir(lib_path):
-            continue
-        try:
-            for entry in os.listdir(lib_path):
-                sp = os.path.join(lib_path, entry, "site-packages")
-                if os.path.isdir(sp):
-                    candidates.append(sp)
-        except OSError:
-            pass
+        venv_root = os.path.join(os.getcwd(), venv_name)
+
+        # Unix layout: {venv}/lib/pythonX.Y/site-packages
+        lib_path = os.path.join(venv_root, "lib")
+        if os.path.isdir(lib_path):
+            try:
+                for entry in os.listdir(lib_path):
+                    sp = os.path.join(lib_path, entry, "site-packages")
+                    if os.path.isdir(sp):
+                        candidates.append(sp)
+            except OSError:
+                pass
+
+        # Windows layout: {venv}/Lib/site-packages (capital L, no version subfolder)
+        win_sp = os.path.join(venv_root, "Lib", "site-packages")
+        if os.path.isdir(win_sp) and win_sp not in candidates:
+            candidates.append(win_sp)
 
     return candidates
 
@@ -154,7 +161,9 @@ def find_local_package(package_name, version):
 
     Searches the current Python environment and any common virtualenv
     directories (.venv, venv, env, .env) in the current working directory.
-    No full-filesystem scan is performed.
+    No full-filesystem scan is performed; once a dist-info entry that
+    matches the requested version is found, find_package_root() walks only
+    that site-packages directory to locate the package source.
 
     Returns the path to the package source directory (the directory that
     contains ``__init__.py``) if a matching installation is found, or
@@ -214,15 +223,19 @@ def generate_skill(package, version, grep_map, package_root, output_dir, use_sym
         if not os.path.exists(dst_file):
             try:
                 if use_symlinks:
-                    rel_src = os.path.relpath(
-                        os.path.abspath(src_file), os.path.dirname(dst_file)
-                    )
-                    os.symlink(rel_src, dst_file)
+                    try:
+                        rel_src = os.path.relpath(
+                            os.path.abspath(src_file), os.path.dirname(dst_file)
+                        )
+                        os.symlink(rel_src, dst_file)
+                    except (ValueError, OSError, NotImplementedError):
+                        # Fall back to a regular copy when symlinks are unavailable
+                        # (e.g. Windows without Developer Mode, or cross-drive paths).
+                        shutil.copy2(src_file, dst_file)
                 else:
                     shutil.copy2(src_file, dst_file)
             except Exception as e:
-                action = "symlinking" if use_symlinks else "copying"
-                print(f"Error {action} {src_file}: {e}")
+                print(f"Error copying {src_file}: {e}")
 
     # Build SKILL.md
     skill_md_path = os.path.join(skill_dir, "SKILL.md")
