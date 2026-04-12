@@ -235,7 +235,8 @@ def generate_skill(package, version, grep_map, package_root, output_dir, use_sym
                 else:
                     shutil.copy2(src_file, dst_file)
             except Exception as e:
-                print(f"Error copying {src_file}: {e}")
+                op = "symlinking (with copy fallback)" if use_symlinks else "copying"
+                print(f"Error {op} {src_file}: {e}")
 
     # Build SKILL.md
     skill_md_path = os.path.join(skill_dir, "SKILL.md")

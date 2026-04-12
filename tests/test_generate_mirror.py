@@ -32,7 +32,8 @@ def _check_symlinks_available():
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(td, "src.txt")
         dst = os.path.join(td, "dst.txt")
-        open(src, "w").close()
+        with open(src, "w"):
+            pass
         try:
             os.symlink(src, dst)
             return True
