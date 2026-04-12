@@ -7,6 +7,7 @@ import tarfile
 import zipfile
 import shutil
 import glob
+import site
 
 # Known default skill-installation paths per major AI agent provider.
 # These can be overridden via config.json or the AGENT_SKILLS_PATH env var.
@@ -109,6 +110,81 @@ def find_package_root(extract_path, package_name):
     
     return None
 
+def _get_site_packages_candidates():
+    """Return site-packages directories to search for installed packages.
+
+    Includes the current Python environment's site-packages and any common
+    virtualenv directories (.venv, venv, env, .env) found directly inside the
+    current working directory.  No recursive filesystem walk is performed so
+    this stays fast regardless of project size.
+    """
+    candidates = []
+
+    # 1. Current Python interpreter's site-packages
+    try:
+        candidates.extend(site.getsitepackages())
+    except AttributeError:
+        # getsitepackages() is absent in some virtualenv builds
+        pass
+    try:
+        user_site = site.getusersitepackages()
+        if user_site not in candidates:
+            candidates.append(user_site)
+    except AttributeError:
+        pass
+
+    # 2. Common virtualenv directory names in the current working directory
+    for venv_name in (".venv", "venv", "env", ".env"):
+        lib_path = os.path.join(os.getcwd(), venv_name, "lib")
+        if not os.path.isdir(lib_path):
+            continue
+        try:
+            for entry in os.listdir(lib_path):
+                sp = os.path.join(lib_path, entry, "site-packages")
+                if os.path.isdir(sp):
+                    candidates.append(sp)
+        except OSError:
+            pass
+
+    return candidates
+
+
+def find_local_package(package_name, version):
+    """Check whether *package_name==version* is already installed locally.
+
+    Searches the current Python environment and any common virtualenv
+    directories (.venv, venv, env, .env) in the current working directory.
+    No full-filesystem scan is performed.
+
+    Returns the path to the package source directory (the directory that
+    contains ``__init__.py``) if a matching installation is found, or
+    ``None`` otherwise.
+    """
+    norm_name = package_name.lower().replace("-", "_")
+    hyphen_name = package_name.lower().replace("_", "-")
+    # Both common normalizations for the dist-info directory name
+    dist_info_names = {
+        f"{norm_name}-{version}.dist-info",
+        f"{hyphen_name}-{version}.dist-info",
+    }
+
+    for site_pkg in _get_site_packages_candidates():
+        if not os.path.isdir(site_pkg):
+            continue
+        try:
+            entries = os.listdir(site_pkg)
+        except OSError:
+            continue
+        # A dist-info directory with the exact version confirms the installation
+        has_dist_info = any(e.lower() in dist_info_names for e in entries)
+        if has_dist_info:
+            pkg_dir = find_package_root(site_pkg, package_name)
+            if pkg_dir:
+                return pkg_dir
+
+    return None
+
+
 def build_grep_map(package_root):
     grep_map = []
     # We want to maintain relative structure from the root
@@ -122,7 +198,7 @@ def build_grep_map(package_root):
                 grep_map.extend(parse_file(file_path, package_root))
     return grep_map
 
-def generate_skill(package, version, grep_map, package_root, output_dir):
+def generate_skill(package, version, grep_map, package_root, output_dir, use_symlinks=False):
     skill_name = f"{package}-{version}".lower().replace("_", "-")
     skill_dir = os.path.join(output_dir, skill_name)
     os.makedirs(skill_dir, exist_ok=True)
@@ -130,16 +206,23 @@ def generate_skill(package, version, grep_map, package_root, output_dir):
     ref_dir = os.path.join(skill_dir, "references")
     os.makedirs(ref_dir, exist_ok=True)
     
-    # Copy source files to references/
+    # Copy (or symlink) source files to references/
     for item in grep_map:
         src_file = os.path.join(package_root, item['file'])
         dst_file = os.path.join(ref_dir, item['file'])
         os.makedirs(os.path.dirname(dst_file), exist_ok=True)
         if not os.path.exists(dst_file):
             try:
-                shutil.copy2(src_file, dst_file)
+                if use_symlinks:
+                    rel_src = os.path.relpath(
+                        os.path.abspath(src_file), os.path.dirname(dst_file)
+                    )
+                    os.symlink(rel_src, dst_file)
+                else:
+                    shutil.copy2(src_file, dst_file)
             except Exception as e:
-                print(f"Error copying {src_file}: {e}")
+                action = "symlinking" if use_symlinks else "copying"
+                print(f"Error {action} {src_file}: {e}")
 
     # Build SKILL.md
     skill_md_path = os.path.join(skill_dir, "SKILL.md")
@@ -245,26 +328,39 @@ if __name__ == "__main__":
         
     # Expand ~ in paths
     skills_dir = os.path.expanduser(skills_dir)
-    
-    tmp = "tmp_download"
-    if os.path.exists(tmp):
-        shutil.rmtree(tmp)
-    os.makedirs(tmp)
-    
-    try:
-        extract_path = download_package(pkg, ver, tmp)
-        pkg_root = find_package_root(extract_path, pkg)
 
-        if not pkg_root:
-            print(f"Could not find package root for {pkg} in {extract_path}")
+    # Check for a local installation before downloading
+    print(f"Checking for local installation of {pkg}=={ver}...")
+    local_pkg_root = find_local_package(pkg, ver)
+
+    if local_pkg_root:
+        print(f"Found local installation at: {local_pkg_root}")
+        try:
+            g_map = build_grep_map(local_pkg_root)
+            generate_skill(pkg, ver, g_map, local_pkg_root, skills_dir, use_symlinks=True)
+        except Exception as e:
+            print(f"Error: {e}")
             sys.exit(1)
-
-        print(f"Found package root at: {pkg_root}")
-        g_map = build_grep_map(pkg_root)
-        generate_skill(pkg, ver, g_map, pkg_root, skills_dir)
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-    finally:
+    else:
+        tmp = "tmp_download"
         if os.path.exists(tmp):
             shutil.rmtree(tmp)
+        os.makedirs(tmp)
+
+        try:
+            extract_path = download_package(pkg, ver, tmp)
+            pkg_root = find_package_root(extract_path, pkg)
+
+            if not pkg_root:
+                print(f"Could not find package root for {pkg} in {extract_path}")
+                sys.exit(1)
+
+            print(f"Found package root at: {pkg_root}")
+            g_map = build_grep_map(pkg_root)
+            generate_skill(pkg, ver, g_map, pkg_root, skills_dir)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        finally:
+            if os.path.exists(tmp):
+                shutil.rmtree(tmp)
