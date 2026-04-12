@@ -33,5 +33,32 @@ When the trigger conditions are met, follow these steps to generate a grounded r
 - **Coordinate System:** Use the provided line ranges to avoid reading large files. Only grep exactly what you need.
 - **Grounding:** If the package source is available, there is no excuse for API hallucinations.
 
+## Provider Compatibility
+
+This skill is designed to work with any AI agent provider that can execute Python scripts. The output location is configurable for each provider:
+
+| Provider   | Default skills path         | Auto-detected via env var(s)                              |
+|------------|-----------------------------|-----------------------------------------------------------|
+| Claude     | `~/.claude/skills`          | `ANTHROPIC_API_KEY`, `CLAUDE_API_KEY`                     |
+| Gemini     | `~/.gemini/skills`          | `GEMINI_API_KEY`, `GOOGLE_GENERATIVEAI_API_KEY`           |
+| Codex      | `~/.copilot/skills`         | `CODEX_API_KEY`, `GITHUB_COPILOT_TOKEN`                   |
+| Cursor     | `~/.cursor/skills`          | —                                                         |
+| OpenAI     | `~/.openai/skills`          | `OPENAI_API_KEY`                                          |
+| OpenClaw   | `~/.openclaw/skills`        | —                                                         |
+| Cline      | `~/.cline/skills`           | —                                                         |
+
+**Configuration priority** (highest wins):
+1. `AGENT_SKILLS_PATH` environment variable
+2. `skills_path` in `config.json`
+3. Provider-specific default (auto-detected or set via `provider` in `config.json` / `AGENT_PROVIDER` env var)
+4. `.skills/` in the current working directory
+
+Example `config.json` for explicit provider selection:
+```json
+{
+  "provider": "gemini"
+}
+```
+
 ---
 *Note: This skill currently supports Python packages via PyPI.*

@@ -8,6 +8,18 @@ import zipfile
 import shutil
 import glob
 
+# Known default skill-installation paths per major AI agent provider.
+# These can be overridden via config.json or the AGENT_SKILLS_PATH env var.
+PROVIDER_DEFAULTS = {
+    "claude":   "~/.claude/skills",
+    "gemini":   "~/.gemini/skills",
+    "codex":    "~/.copilot/skills",
+    "cursor":   "~/.cursor/skills",
+    "openai":   "~/.openai/skills",
+    "openclaw": "~/.openclaw/skills",
+    "cline":    "~/.cline/skills",
+}
+
 def get_docstring_summary(node):
     docstring = ast.get_docstring(node)
     if docstring:
@@ -155,27 +167,60 @@ def generate_skill(package, version, grep_map, package_root, output_dir):
     print(f"Skill generated at: {skill_dir}")
     return skill_dir
 
+def detect_provider():
+    """Detect the active AI agent provider from well-known environment variables."""
+    # Explicit override always wins
+    if "AGENT_PROVIDER" in os.environ:
+        return os.environ["AGENT_PROVIDER"].lower()
+    # Presence-based detection via provider-specific env vars
+    if "ANTHROPIC_API_KEY" in os.environ or "CLAUDE_API_KEY" in os.environ:
+        return "claude"
+    if "GEMINI_API_KEY" in os.environ or "GOOGLE_GENERATIVEAI_API_KEY" in os.environ:
+        return "gemini"
+    if "OPENAI_API_KEY" in os.environ:
+        return "openai"
+    if "CODEX_API_KEY" in os.environ or "GITHUB_COPILOT_TOKEN" in os.environ:
+        return "codex"
+    return None
+
+
 def get_config():
     # Try to load config from the script's directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(os.path.dirname(script_dir), "config.json")
-    
+
     config = {
-        "skills_path": os.path.join(os.getcwd(), ".skills")
+        "skills_path": os.path.join(os.getcwd(), ".skills"),
+        "provider": None,
+        "provider_defaults": PROVIDER_DEFAULTS.copy(),
     }
-    
+
+    user_config = {}
     if os.path.exists(config_path):
         try:
             with open(config_path, "r") as f:
                 user_config = json.load(f)
-                config.update(user_config)
+            # Deep-merge provider_defaults so callers can extend the table
+            if "provider_defaults" in user_config:
+                config["provider_defaults"].update(user_config.pop("provider_defaults"))
+            config.update(user_config)
         except Exception as e:
             print(f"Warning: Could not read config.json: {e}")
-            
-    # Environment variable override
+
+    # Resolve provider: config file < env var
+    provider = config.get("provider") or detect_provider()
+    if provider:
+        config["provider"] = provider
+
+    # Apply provider default path only when no explicit path was configured
+    explicit_path_in_config = "skills_path" in user_config
+    if provider and provider in config["provider_defaults"] and not explicit_path_in_config:
+        config.setdefault("skills_path", config["provider_defaults"][provider])
+
+    # Environment variable override – highest priority
     if "AGENT_SKILLS_PATH" in os.environ:
         config["skills_path"] = os.environ["AGENT_SKILLS_PATH"]
-        
+
     return config
 
 if __name__ == "__main__":
@@ -205,17 +250,14 @@ if __name__ == "__main__":
     try:
         extract_path = download_package(pkg, ver, tmp)
         pkg_root = find_package_root(extract_path, pkg)
-        
+
         if not pkg_root:
             print(f"Could not find package root for {pkg} in {extract_path}")
             sys.exit(1)
-            if pkg_root:
-                print(f"Found package root at: {pkg_root}")
-                g_map = build_grep_map(pkg_root)
 
-                generate_skill(pkg, ver, g_map, pkg_root, skills_dir)
-
-        
+        print(f"Found package root at: {pkg_root}")
+        g_map = build_grep_map(pkg_root)
+        generate_skill(pkg, ver, g_map, pkg_root, skills_dir)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
