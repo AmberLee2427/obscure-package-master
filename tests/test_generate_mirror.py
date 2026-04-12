@@ -15,11 +15,37 @@ import json
 import os
 import sys
 import tarfile
+import tempfile
 import textwrap
 from pathlib import Path
 from unittest import mock
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Platform helpers
+# ---------------------------------------------------------------------------
+
+def _check_symlinks_available():
+    """Return True if the OS permits creating symlinks without special privileges."""
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "src.txt")
+        dst = os.path.join(td, "dst.txt")
+        with open(src, "w"):
+            pass
+        try:
+            os.symlink(src, dst)
+            return True
+        except (OSError, NotImplementedError):
+            return False
+
+
+SYMLINKS_AVAILABLE = _check_symlinks_available()
+requires_symlinks = pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="Symlinks require Developer Mode or elevated privileges on this platform",
+)
 
 # ---------------------------------------------------------------------------
 # Helpers – load the module under test without executing __main__
@@ -571,3 +597,197 @@ class TestEndToEnd:
     def test_provider_detection_parametrized(self, clean_env, env_var, expected_provider):
         clean_env.setenv(env_var, "dummy-value")
         assert gm.detect_provider() == expected_provider
+
+
+# ===========================================================================
+# 10. _get_site_packages_candidates
+# ===========================================================================
+
+class TestGetSitePackagesCandidates:
+    def test_returns_list(self):
+        result = gm._get_site_packages_candidates()
+        assert isinstance(result, list)
+
+    def test_includes_current_env(self):
+        """At least one entry from the live Python environment is present."""
+        import site as _site
+        result = gm._get_site_packages_candidates()
+        try:
+            current = _site.getsitepackages()
+        except AttributeError:
+            pytest.skip("getsitepackages() not available in this build")
+        assert any(sp in result for sp in current)
+
+    def test_includes_dotenv_venv(self, tmp_path, monkeypatch):
+        """A .venv/lib/pythonX.Y/site-packages directory (Unix layout) is discovered."""
+        sp = tmp_path / ".venv" / "lib" / "python3.9" / "site-packages"
+        sp.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        result = gm._get_site_packages_candidates()
+        assert str(sp) in result
+
+    def test_includes_dotenv_venv_windows_layout(self, tmp_path, monkeypatch):
+        """A .venv/Lib/site-packages directory (Windows layout) is discovered."""
+        sp = tmp_path / ".venv" / "Lib" / "site-packages"
+        sp.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        result = gm._get_site_packages_candidates()
+        assert str(sp) in result
+
+    def test_venv_without_lib_ignored(self, tmp_path, monkeypatch):
+        """A venv directory that has no lib/ sub-dir causes no error."""
+        (tmp_path / "venv").mkdir()
+        monkeypatch.chdir(tmp_path)
+        result = gm._get_site_packages_candidates()
+        assert isinstance(result, list)
+
+
+# ===========================================================================
+# 11. find_local_package
+# ===========================================================================
+
+class TestFindLocalPackage:
+    def _make_fake_site_packages(self, base, pkg_name, version):
+        """Create a minimal site-packages tree with dist-info and package dir."""
+        norm = pkg_name.lower().replace("-", "_")
+        sp = base / "site-packages"
+        sp.mkdir(parents=True, exist_ok=True)
+        # dist-info directory signals that the package is installed
+        (sp / f"{norm}-{version}.dist-info").mkdir()
+        # Package source directory
+        pkg_dir = sp / norm
+        pkg_dir.mkdir()
+        (pkg_dir / "__init__.py").write_text("# fake installed package")
+        return sp
+
+    def test_finds_package_in_current_env(self, tmp_path, monkeypatch):
+        sp = self._make_fake_site_packages(tmp_path, "mypkg", "1.0.0")
+        monkeypatch.setattr(gm, "_get_site_packages_candidates", lambda: [str(sp)])
+        result = gm.find_local_package("mypkg", "1.0.0")
+        assert result is not None
+        assert result.endswith("mypkg")
+
+    def test_returns_none_when_version_mismatch(self, tmp_path, monkeypatch):
+        sp = self._make_fake_site_packages(tmp_path, "mypkg", "2.0.0")
+        monkeypatch.setattr(gm, "_get_site_packages_candidates", lambda: [str(sp)])
+        result = gm.find_local_package("mypkg", "1.0.0")
+        assert result is None
+
+    def test_returns_none_when_package_absent(self, tmp_path, monkeypatch):
+        sp = tmp_path / "site-packages"
+        sp.mkdir()
+        monkeypatch.setattr(gm, "_get_site_packages_candidates", lambda: [str(sp)])
+        result = gm.find_local_package("mypkg", "1.0.0")
+        assert result is None
+
+    def test_finds_package_with_hyphen_in_name(self, tmp_path, monkeypatch):
+        """Package names with hyphens are normalised to underscores."""
+        sp = self._make_fake_site_packages(tmp_path, "my-pkg", "3.1.4")
+        monkeypatch.setattr(gm, "_get_site_packages_candidates", lambda: [str(sp)])
+        result = gm.find_local_package("my-pkg", "3.1.4")
+        assert result is not None
+
+    def test_scans_multiple_candidates(self, tmp_path, monkeypatch):
+        """Returns a match from the second candidate when the first has no match."""
+        sp1 = tmp_path / "sp1"
+        sp1.mkdir()
+        sp2_base = tmp_path / "sp2_base"
+        sp2 = self._make_fake_site_packages(sp2_base, "mypkg", "1.0.0")
+        monkeypatch.setattr(gm, "_get_site_packages_candidates", lambda: [str(sp1), str(sp2)])
+        result = gm.find_local_package("mypkg", "1.0.0")
+        assert result is not None
+
+    def test_finds_package_in_nearby_venv(self, tmp_path, monkeypatch):
+        """Package installed in a .venv in CWD is discovered on both Unix and Windows layouts."""
+        # Create both layouts so the test is platform-independent
+        unix_sp_base = tmp_path / ".venv" / "lib" / "python3.9"
+        self._make_fake_site_packages(unix_sp_base, "mypkg", "0.5.0")
+        win_sp_base = tmp_path / ".venv" / "Lib"
+        self._make_fake_site_packages(win_sp_base, "mypkg", "0.5.0")
+        monkeypatch.chdir(tmp_path)
+        # Don't patch _get_site_packages_candidates so the real function runs
+        result = gm.find_local_package("mypkg", "0.5.0")
+        assert result is not None
+
+
+# ===========================================================================
+# 12. generate_skill with use_symlinks=True
+# ===========================================================================
+
+class TestGenerateSkillSymlinks:
+    @requires_symlinks
+    def test_symlinks_created_instead_of_copies(self, tmp_path, tmp_pkg):
+        out_dir = tmp_path / "skills"
+        out_dir.mkdir()
+        grep_map = gm.build_grep_map(str(tmp_pkg))
+        skill_dir = Path(gm.generate_skill(
+            "mypkg", "1.0.0", grep_map, str(tmp_pkg), str(out_dir), use_symlinks=True
+        ))
+        ref_init = skill_dir / "references" / "__init__.py"
+        assert ref_init.is_symlink(), "Expected a symlink, not a regular file"
+
+    @requires_symlinks
+    def test_symlinks_point_to_original_source(self, tmp_path, tmp_pkg):
+        out_dir = tmp_path / "skills"
+        out_dir.mkdir()
+        grep_map = gm.build_grep_map(str(tmp_pkg))
+        skill_dir = Path(gm.generate_skill(
+            "mypkg", "1.0.0", grep_map, str(tmp_pkg), str(out_dir), use_symlinks=True
+        ))
+        ref_init = skill_dir / "references" / "__init__.py"
+        assert ref_init.resolve() == (tmp_pkg / "__init__.py").resolve()
+
+    @requires_symlinks
+    def test_symlinks_are_relative(self, tmp_path, tmp_pkg):
+        out_dir = tmp_path / "skills"
+        out_dir.mkdir()
+        grep_map = gm.build_grep_map(str(tmp_pkg))
+        skill_dir = Path(gm.generate_skill(
+            "mypkg", "1.0.0", grep_map, str(tmp_pkg), str(out_dir), use_symlinks=True
+        ))
+        ref_init = skill_dir / "references" / "__init__.py"
+        target = os.readlink(str(ref_init))
+        assert not os.path.isabs(target), "Symlink target should be relative for portability"
+
+    def test_symlinks_readable(self, tmp_path, tmp_pkg):
+        out_dir = tmp_path / "skills"
+        out_dir.mkdir()
+        grep_map = gm.build_grep_map(str(tmp_pkg))
+        skill_dir = Path(gm.generate_skill(
+            "mypkg", "1.0.0", grep_map, str(tmp_pkg), str(out_dir), use_symlinks=True
+        ))
+        ref_init = skill_dir / "references" / "__init__.py"
+        assert ref_init.read_text() == (tmp_pkg / "__init__.py").read_text()
+
+    def test_copy_mode_still_produces_regular_file(self, tmp_path, tmp_pkg):
+        out_dir = tmp_path / "skills"
+        out_dir.mkdir()
+        grep_map = gm.build_grep_map(str(tmp_pkg))
+        skill_dir = Path(gm.generate_skill(
+            "mypkg", "1.0.0", grep_map, str(tmp_pkg), str(out_dir), use_symlinks=False
+        ))
+        ref_init = skill_dir / "references" / "__init__.py"
+        assert ref_init.is_file() and not ref_init.is_symlink()
+
+    def test_skill_md_present_when_symlinks(self, tmp_path, tmp_pkg):
+        out_dir = tmp_path / "skills"
+        out_dir.mkdir()
+        grep_map = gm.build_grep_map(str(tmp_pkg))
+        skill_dir = Path(gm.generate_skill(
+            "mypkg", "1.0.0", grep_map, str(tmp_pkg), str(out_dir), use_symlinks=True
+        ))
+        assert (skill_dir / "SKILL.md").is_file()
+
+    def test_falls_back_to_copy_when_symlink_fails(self, tmp_path, tmp_pkg):
+        """When symlink creation raises OSError, a regular file copy is used instead."""
+        out_dir = tmp_path / "skills"
+        out_dir.mkdir()
+        grep_map = gm.build_grep_map(str(tmp_pkg))
+        with mock.patch("os.symlink", side_effect=OSError("symlinks not permitted")):
+            skill_dir = Path(gm.generate_skill(
+                "mypkg", "1.0.0", grep_map, str(tmp_pkg), str(out_dir), use_symlinks=True
+            ))
+        ref_init = skill_dir / "references" / "__init__.py"
+        assert ref_init.is_file()
+        assert not ref_init.is_symlink()
+        assert ref_init.read_text() == (tmp_pkg / "__init__.py").read_text()
