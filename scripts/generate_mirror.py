@@ -155,13 +155,47 @@ def generate_skill(package, version, grep_map, package_root, output_dir):
     print(f"Skill generated at: {skill_dir}")
     return skill_dir
 
+def get_config():
+    # Try to load config from the script's directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(os.path.dirname(script_dir), "config.json")
+    
+    config = {
+        "skills_path": os.path.join(os.getcwd(), ".skills")
+    }
+    
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                user_config = json.load(f)
+                config.update(user_config)
+        except Exception as e:
+            print(f"Warning: Could not read config.json: {e}")
+            
+    # Environment variable override
+    if "AGENT_SKILLS_PATH" in os.environ:
+        config["skills_path"] = os.environ["AGENT_SKILLS_PATH"]
+        
+    return config
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python3 generate_mirror.py <package> <version>")
+        print("Usage: python3 generate_mirror.py <package> <version> [output_path]")
         sys.exit(1)
         
     pkg = sys.argv[1]
     ver = sys.argv[2]
+    
+    config = get_config()
+    
+    # Priority: 1. CLI Arg, 2. Env Var/Config, 3. Default (.skills/)
+    if len(sys.argv) >= 4:
+        skills_dir = sys.argv[3]
+    else:
+        skills_dir = config["skills_path"]
+        
+    # Expand ~ in paths
+    skills_dir = os.path.expanduser(skills_dir)
     
     tmp = "tmp_download"
     if os.path.exists(tmp):
@@ -175,14 +209,12 @@ if __name__ == "__main__":
         if not pkg_root:
             print(f"Could not find package root for {pkg} in {extract_path}")
             sys.exit(1)
-            
-        print(f"Found package root at: {pkg_root}")
-        g_map = build_grep_map(pkg_root)
-        
-        # Determine output skills directory
-        # Project local .skills/
-        skills_dir = os.path.join(os.getcwd(), ".skills")
-        generate_skill(pkg, ver, g_map, pkg_root, skills_dir)
+            if pkg_root:
+                print(f"Found package root at: {pkg_root}")
+                g_map = build_grep_map(pkg_root)
+
+                generate_skill(pkg, ver, g_map, pkg_root, skills_dir)
+
         
     except Exception as e:
         print(f"Error: {e}")
