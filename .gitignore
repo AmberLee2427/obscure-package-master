@@ -1,0 +1,11 @@
+# Local skills
+.skills/
+
+# Temp files
+tmp_download/
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
