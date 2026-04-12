@@ -190,7 +190,6 @@ def get_config():
     config_path = os.path.join(os.path.dirname(script_dir), "config.json")
 
     config = {
-        "skills_path": os.path.join(os.getcwd(), ".skills"),
         "provider": None,
         "provider_defaults": PROVIDER_DEFAULTS.copy(),
     }
@@ -207,15 +206,20 @@ def get_config():
         except Exception as e:
             print(f"Warning: Could not read config.json: {e}")
 
-    # Resolve provider: config file < env var
-    provider = config.get("provider") or detect_provider()
+    # Resolve provider: env var detection takes priority over config file value
+    # (detect_provider() checks AGENT_PROVIDER first, then API-key env vars)
+    provider = detect_provider() or config.get("provider")
     if provider:
         config["provider"] = provider
 
     # Apply provider default path only when no explicit path was configured
     explicit_path_in_config = "skills_path" in user_config
     if provider and provider in config["provider_defaults"] and not explicit_path_in_config:
-        config.setdefault("skills_path", config["provider_defaults"][provider])
+        config["skills_path"] = os.path.expanduser(config["provider_defaults"][provider])
+
+    # Fall back to CWD .skills/ if still no path was determined
+    if "skills_path" not in config:
+        config["skills_path"] = os.path.join(os.getcwd(), ".skills")
 
     # Environment variable override – highest priority
     if "AGENT_SKILLS_PATH" in os.environ:

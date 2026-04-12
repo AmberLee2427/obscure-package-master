@@ -365,6 +365,14 @@ class TestGetConfigDefaultOnly:
             cfg = gm.get_config()
         assert cfg.get("provider") is None
 
+    def test_provider_env_var_sets_default_path(self, clean_env):
+        """Auto-detected provider with no config file → use provider default path."""
+        clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
+        with mock.patch("os.path.exists", return_value=False):
+            cfg = gm.get_config()
+        assert cfg["provider"] == "claude"
+        assert cfg["skills_path"] == os.path.expanduser("~/.claude/skills")
+
 
 class TestGetConfigFromFile:
     """Config loaded from a config.json."""
@@ -378,10 +386,6 @@ class TestGetConfigFromFile:
         self._write_config(tmp_path, {"skills_path": "/custom/skills"})
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()
-        with mock.patch.object(gm, "get_config", wraps=gm.get_config):
-            with mock.patch("os.path.dirname", side_effect=lambda p: str(tmp_path) if "scripts" in str(p) else os.path.dirname(p)):
-                pass  # Structural test – we call directly below
-
         # Directly patch the script's __file__ resolution path
         fake_script = str(scripts_dir / "generate_mirror.py")
         with mock.patch.object(gm.os.path, "abspath", return_value=fake_script):
@@ -413,6 +417,37 @@ class TestGetConfigFromFile:
         assert "mycorp" in cfg["provider_defaults"]
         # Built-in providers still present
         assert "claude" in cfg["provider_defaults"]
+
+    def test_provider_default_path_applied_when_no_explicit_skills_path(self, clean_env, tmp_path):
+        """When config sets a provider but no skills_path, the provider default path is used."""
+        self._write_config(tmp_path, {"provider": "gemini"})
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        fake_script = str(scripts_dir / "generate_mirror.py")
+        with mock.patch.object(gm.os.path, "abspath", return_value=fake_script):
+            cfg = gm.get_config()
+        assert cfg["skills_path"] == os.path.expanduser("~/.gemini/skills")
+
+    def test_provider_default_path_not_applied_when_skills_path_set(self, clean_env, tmp_path):
+        """Explicit skills_path in config takes priority over provider default."""
+        self._write_config(tmp_path, {"provider": "gemini", "skills_path": "/explicit/path"})
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        fake_script = str(scripts_dir / "generate_mirror.py")
+        with mock.patch.object(gm.os.path, "abspath", return_value=fake_script):
+            cfg = gm.get_config()
+        assert cfg["skills_path"] == "/explicit/path"
+
+    def test_agent_provider_env_overrides_config_provider(self, clean_env, tmp_path):
+        """AGENT_PROVIDER env var takes priority over provider set in config.json."""
+        clean_env.setenv("AGENT_PROVIDER", "cursor")
+        self._write_config(tmp_path, {"provider": "gemini"})
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        fake_script = str(scripts_dir / "generate_mirror.py")
+        with mock.patch.object(gm.os.path, "abspath", return_value=fake_script):
+            cfg = gm.get_config()
+        assert cfg["provider"] == "cursor"
 
 
 class TestGetConfigEnvVarOverride:
