@@ -60,8 +60,6 @@ If none of the above apply, the script exits with an error listing the available
 | `AGENT_PROVIDER` | Explicit provider selection (optional) |
 | `AGENT_SKILLS_PATH` | Explicit output path override (optional) |
 
-No API key or credential environment variables are read. Provider auto-detection works by comparing the script's installed path against the known provider defaults—so it works with OAuth, API keys, or any other auth method equally well.
-
 Example `config.json` for explicit provider selection:
 ```json
 {

@@ -14,7 +14,7 @@ import site
 PROVIDER_DEFAULTS = {
     "claude":   "~/.claude/skills",
     "gemini":   "~/.gemini/skills",
-    "codex":    "~/.copilot/skills",
+    "codex":    "~/.codex/skills",
     "cursor":   "~/.cursor/skills",
     "openclaw": "~/.openclaw/skills",
     "cline":    "~/.cline/skills",
