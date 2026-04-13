@@ -64,10 +64,25 @@ def parse_file(file_path, package_root):
     return results
 
 def _safe_extract_tar(tar, path):
-    """Extract a tarfile archive while rejecting members that would escape *path*."""
+    """Extract a tarfile archive while rejecting members that would escape *path*.
+
+    On Python 3.12+ the ``filter='data'`` argument is passed to
+    ``extractall()``, which causes the tarfile module itself to block
+    symlinks, hardlinks, and device files.  On older Python versions we
+    perform the same checks manually so that the classic symlink-chaining
+    attack (create a symlink inside the target dir, then write a subsequent
+    member through it to a path outside the target) is prevented.
+    """
     real_path = os.path.realpath(path) + os.sep
     safe_members = []
     for member in tar.getmembers():
+        # Always reject non-regular-file types on Python <3.12 (filter='data'
+        # handles this on 3.12+).  A symlink or hardlink in the archive can
+        # point outside the target directory; a device file should never appear
+        # in a source distribution.
+        if member.issym() or member.islnk() or member.isdev():
+            print(f"Warning: Skipping non-regular archive member: {member.name!r}")
+            continue
         member_path = os.path.realpath(os.path.join(path, member.name))
         if not member_path.startswith(real_path):
             print(f"Warning: Skipping unsafe archive member: {member.name!r}")
@@ -435,9 +450,11 @@ if __name__ == "__main__":
         "--local",
         action="store_true",
         help=(
-            "Install the skill into the current working directory, "
-            "bypassing provider auto-detection and config. "
-            "Useful for project-scoped skills."
+            "Install the skill into the project-local provider hidden directory "
+            "(e.g. ./.claude/skills/ for Claude). "
+            "Requires a detectable provider via AGENT_PROVIDER, config.json, "
+            "or the script's own install path. "
+            "Use an explicit output_path instead if no provider is configured."
         ),
     )
     args = parser.parse_args()

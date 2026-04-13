@@ -862,6 +862,34 @@ class TestSafeExtractTar:
         assert not (tmp_path / "evil.txt").exists()
         assert "Skipping" in capsys.readouterr().out
 
+    def test_skips_symlink_members(self, tmp_path, capsys):
+        tb_path = tmp_path / "sym.tar.gz"
+        with tarfile.open(str(tb_path), "w:gz") as tar:
+            info = tarfile.TarInfo(name="link")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+        out = tmp_path / "out"
+        out.mkdir()
+        with tarfile.open(str(tb_path)) as tar:
+            gm._safe_extract_tar(tar, str(out))
+        assert not (out / "link").exists()
+        assert "Skipping" in capsys.readouterr().out
+
+    def test_skips_hardlink_members(self, tmp_path, capsys):
+        tb_path = tmp_path / "hard.tar.gz"
+        with tarfile.open(str(tb_path), "w:gz") as tar:
+            info = tarfile.TarInfo(name="hardlink")
+            info.type = tarfile.LNKTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+        out = tmp_path / "out"
+        out.mkdir()
+        with tarfile.open(str(tb_path)) as tar:
+            gm._safe_extract_tar(tar, str(out))
+        assert not (out / "hardlink").exists()
+        assert "Skipping" in capsys.readouterr().out
+
 
 class TestSafeExtractZip:
     def _make_legit_zip(self, tmp_path):
