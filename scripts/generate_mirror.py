@@ -74,7 +74,12 @@ def _safe_extract_tar(tar, path):
             print(f"Warning: Skipping unsafe archive member: {member.name!r}")
             continue
         safe_members.append(member)
-    tar.extractall(path=path, members=safe_members)
+    # Pass filter='data' when available (Python 3.12+) to suppress the
+    # DeprecationWarning about unfiltered extraction in future Python versions.
+    try:
+        tar.extractall(path=path, members=safe_members, filter="data")
+    except TypeError:
+        tar.extractall(path=path, members=safe_members)
 
 
 def _safe_extract_zip(zf, path):
@@ -231,6 +236,28 @@ def build_grep_map(package_root):
                 grep_map.extend(parse_file(file_path, package_root))
     return grep_map
 
+def _resolve_skills_dir(explicit_path, local, config_skills_path):
+    """Return the final output directory for the generated skill, or ``None``.
+
+    Priority (highest first):
+    1. *explicit_path* — a path supplied directly on the CLI.
+    2. *local* flag — installs directly into the current working directory.
+    3. *config_skills_path* — whatever ``get_config()`` resolved (env var,
+       config file, or provider default).  May be ``None`` if nothing was
+       configured.
+
+    Returns ``None`` when no directory could be determined; the caller is
+    responsible for reporting an error in that case.
+    """
+    if explicit_path is not None:
+        return os.path.expanduser(explicit_path)
+    if local:
+        return os.getcwd()
+    if config_skills_path is not None:
+        return os.path.expanduser(config_skills_path)
+    return None
+
+
 def generate_skill(package, version, grep_map, package_root, output_dir, use_symlinks=False):
     skill_name = f"{package}-{version}".lower().replace("_", "-")
     skill_dir = os.path.join(output_dir, skill_name)
@@ -311,17 +338,22 @@ def detect_provider(provider_defaults=None, script_path=None):
     if script_path is None:
         script_path = os.path.abspath(__file__)
 
-    skills_dir = os.path.realpath(os.path.dirname(os.path.dirname(os.path.dirname(script_path))))
+    # Use normpath (not realpath) to canonicalise — realpath calls abspath
+    # internally which can interfere with test mocking.
+    skills_dir = os.path.normpath(
+        os.path.dirname(os.path.dirname(os.path.dirname(script_path)))
+    )
     for provider, default_path in provider_defaults.items():
-        if skills_dir == os.path.realpath(os.path.expanduser(default_path)):
+        if skills_dir == os.path.normpath(os.path.expanduser(default_path)):
             return provider
 
     return None
 
 
 def get_config():
-    # Try to load config from the script's directory
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Compute script path once so detect_provider uses the same value.
+    script_path = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_path)
     config_path = os.path.join(os.path.dirname(script_dir), "config.json")
 
     config = {
@@ -343,7 +375,10 @@ def get_config():
 
     # Resolve provider: AGENT_PROVIDER env var and install-path detection,
     # then fall back to the provider set in config.json.
-    provider = detect_provider(provider_defaults=config["provider_defaults"]) or config.get("provider")
+    provider = detect_provider(
+        provider_defaults=config["provider_defaults"],
+        script_path=script_path,
+    ) or config.get("provider")
     if provider:
         config["provider"] = provider
 
@@ -352,9 +387,7 @@ def get_config():
     if provider and provider in config["provider_defaults"] and not explicit_path_in_config:
         config["skills_path"] = os.path.expanduser(config["provider_defaults"][provider])
 
-    # Fall back to CWD .skills/ if still no path was determined
-    if "skills_path" not in config:
-        config["skills_path"] = os.path.join(os.getcwd(), ".skills")
+    # If no skills_path was determined, leave it absent — callers must handle this.
 
     # Environment variable override – highest priority
     if "AGENT_SKILLS_PATH" in os.environ:
@@ -363,23 +396,50 @@ def get_config():
     return config
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python3 generate_mirror.py <package> <version> [output_path]")
-        sys.exit(1)
-        
-    pkg = sys.argv[1]
-    ver = sys.argv[2]
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="generate_mirror.py",
+        description="Generate a local grep-map skill for a PyPI package.",
+    )
+    parser.add_argument("package", help="PyPI package name")
+    parser.add_argument("version", help="Package version (e.g. 1.2.3)")
+    parser.add_argument(
+        "output_path",
+        nargs="?",
+        default=None,
+        help=(
+            "Explicit output directory for the skill. "
+            "Overrides --local, config, and provider auto-detection."
+        ),
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help=(
+            "Install the skill into the current working directory, "
+            "bypassing provider auto-detection and config. "
+            "Useful for project-scoped skills."
+        ),
+    )
+    args = parser.parse_args()
+
+    pkg = args.package
+    ver = args.version
+
     config = get_config()
-    
-    # Priority: 1. CLI Arg, 2. Env Var/Config, 3. Default (.skills/)
-    if len(sys.argv) >= 4:
-        skills_dir = sys.argv[3]
-    else:
-        skills_dir = config["skills_path"]
-        
-    # Expand ~ in paths
-    skills_dir = os.path.expanduser(skills_dir)
+    skills_dir = _resolve_skills_dir(args.output_path, args.local, config.get("skills_path"))
+
+    if skills_dir is None:
+        print(
+            "Error: Could not determine an output directory.\n"
+            "Options:\n"
+            "  --local                   Install into the current working directory\n"
+            "  AGENT_SKILLS_PATH=<path>  Set via environment variable\n"
+            "  skills_path in config.json\n"
+            "  python3 generate_mirror.py <pkg> <ver> <output_path>"
+        )
+        sys.exit(1)
 
     # Check for a local installation before downloading
     print(f"Checking for local installation of {pkg}=={ver}...")

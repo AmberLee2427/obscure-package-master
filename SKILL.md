@@ -20,10 +20,17 @@ When the trigger conditions are met, follow these steps to generate a grounded r
 2.  **Run the Generator:** Execute the `generate_mirror.py` script to create a local skill for that specific package version.
     
     ```bash
+    # Install into the provider's global skills directory (auto-detected from install path):
     python3 <path_to_scripts>/generate_mirror.py <package> <version>
+
+    # Install into the current working directory (project-local):
+    python3 <path_to_scripts>/generate_mirror.py <package> <version> --local
+
+    # Install into an explicit directory:
+    python3 <path_to_scripts>/generate_mirror.py <package> <version> /path/to/skills
     ```
 
-3.  **Activate the New Skill:** Once generated, a new skill will be available in `.skills/<package>-<version>`.
+3.  **Activate the New Skill:** Once generated, a new skill will be available at `<skills_dir>/<package>-<version>`.
 4.  **Use the Grep Map:** Read the `SKILL.md` of the newly created skill. It contains a map of all classes and functions with their exact line ranges.
 5.  **Targeted Reading:** Use the map to perform surgical `read_file` calls on the files in the `references/` directory of the new skill.
     -   *Example:* "I see `MyClass.my_method` is in `references/utils.py` lines 120-145. I will read those lines now."
@@ -47,11 +54,14 @@ This skill is designed to work with any AI agent provider that can execute Pytho
 | OpenClaw   | `~/.openclaw/skills`        |
 | Cline      | `~/.cline/skills`           |
 
-**Configuration priority** (highest wins):
-1. `AGENT_SKILLS_PATH` environment variable
-2. `skills_path` in `config.json`
-3. Provider-specific default (auto-detected from the script's install path, or set explicitly via `provider` in `config.json` / `AGENT_PROVIDER` env var)
-4. `.skills/` in the current working directory
+**Output directory priority** (highest wins):
+1. Explicit `output_path` positional argument on the CLI
+2. `--local` CLI flag → current working directory
+3. `AGENT_SKILLS_PATH` environment variable
+4. `skills_path` in `config.json`
+5. Provider-specific default (auto-detected from the script's install path, or set explicitly via `provider` in `config.json` / `AGENT_PROVIDER` env var)
+
+If none of the above apply, the script exits with an error listing the available options.
 
 ### Environment variables read by the script
 

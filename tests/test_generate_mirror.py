@@ -387,12 +387,13 @@ class TestDetectProvider:
 class TestGetConfigDefaultOnly:
     """No config file, no env vars → defaults."""
 
-    def test_skills_path_defaults_to_dotskills(self, clean_env, tmp_path, monkeypatch):
-        # Point script dir to a tmpdir so no config.json is found
+    def test_skills_path_absent_when_no_hints(self, clean_env, tmp_path, monkeypatch):
+        # Point script dir to a tmpdir so no config.json is found and no
+        # provider path is matched.
         monkeypatch.setattr(gm, "__file__", str(tmp_path / "scripts" / "generate_mirror.py"))
         with mock.patch("os.path.exists", return_value=False):
             cfg = gm.get_config()
-        assert cfg["skills_path"].endswith(".skills")
+        assert "skills_path" not in cfg
 
     def test_provider_is_none_without_hints(self, clean_env, tmp_path):
         with mock.patch("os.path.exists", return_value=False):
@@ -413,7 +414,7 @@ class TestGetConfigDefaultOnly:
         with mock.patch("os.path.exists", return_value=False):
             cfg = gm.get_config()
         assert cfg.get("provider") is None
-        assert cfg["skills_path"].endswith(".skills")
+        assert "skills_path" not in cfg
 
 
 class TestGetConfigFromFile:
@@ -811,3 +812,153 @@ class TestGenerateSkillSymlinks:
         assert ref_init.is_file()
         assert not ref_init.is_symlink()
         assert ref_init.read_text() == (tmp_pkg / "__init__.py").read_text()
+
+
+# ===========================================================================
+# 13. Safe archive extraction helpers
+# ===========================================================================
+
+class TestSafeExtractTar:
+    def _make_legit_tar(self, tmp_path):
+        src = tmp_path / "pkg" / "__init__.py"
+        src.parent.mkdir(parents=True)
+        src.write_text("# safe")
+        tb = tmp_path / "legit.tar.gz"
+        with tarfile.open(str(tb), "w:gz") as tar:
+            tar.add(str(src.parent), arcname="pkg")
+        return tb
+
+    def test_extracts_safe_members(self, tmp_path):
+        tb = self._make_legit_tar(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        with tarfile.open(str(tb)) as tar:
+            gm._safe_extract_tar(tar, str(out))
+        assert (out / "pkg" / "__init__.py").is_file()
+
+    def test_skips_path_traversal_members(self, tmp_path, capsys):
+        import io
+        tb_path = tmp_path / "evil.tar.gz"
+        with tarfile.open(str(tb_path), "w:gz") as tar:
+            info = tarfile.TarInfo(name="../../evil.txt")
+            content = b"evil"
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        out = tmp_path / "out"
+        out.mkdir()
+        with tarfile.open(str(tb_path)) as tar:
+            gm._safe_extract_tar(tar, str(out))
+        assert not (tmp_path / "evil.txt").exists()
+        assert "Skipping" in capsys.readouterr().out
+
+
+class TestSafeExtractZip:
+    def _make_legit_zip(self, tmp_path):
+        import zipfile as zf
+        zp = tmp_path / "legit.zip"
+        with zf.ZipFile(str(zp), "w") as z:
+            z.writestr("pkg/__init__.py", "# safe")
+        return zp
+
+    def test_extracts_safe_members(self, tmp_path):
+        import zipfile as zf
+        zp = self._make_legit_zip(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        with zf.ZipFile(str(zp)) as z:
+            gm._safe_extract_zip(z, str(out))
+        assert (out / "pkg" / "__init__.py").is_file()
+
+    def test_skips_path_traversal_members(self, tmp_path, capsys):
+        import zipfile as zf
+        zp = tmp_path / "evil.zip"
+        with zf.ZipFile(str(zp), "w") as z:
+            z.writestr("../../evil.txt", "evil")
+        out = tmp_path / "out"
+        out.mkdir()
+        with zf.ZipFile(str(zp)) as z:
+            gm._safe_extract_zip(z, str(out))
+        assert not (tmp_path / "evil.txt").exists()
+        assert "Skipping" in capsys.readouterr().out
+
+
+# ===========================================================================
+# 14. _resolve_skills_dir
+# ===========================================================================
+
+class TestResolveSkillsDir:
+    """Unit tests for the output-directory priority logic."""
+
+    def test_explicit_path_wins_over_everything(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path="/explicit/skills",
+            local=True,
+            config_skills_path="/config/skills",
+        )
+        assert result == "/explicit/skills"
+
+    def test_explicit_path_expands_tilde(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path="~/myskills",
+            local=False,
+            config_skills_path="/config/skills",
+        )
+        assert result == os.path.expanduser("~/myskills")
+
+    def test_local_flag_returns_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=True,
+            config_skills_path="/config/skills",
+        )
+        assert result == str(tmp_path)
+
+    def test_local_flag_different_cwd(self, tmp_path, monkeypatch):
+        project = tmp_path / "myproject"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=True,
+            config_skills_path="/config/skills",
+        )
+        assert result == str(project)
+
+    def test_config_path_used_when_no_override(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=False,
+            config_skills_path="/config/skills",
+        )
+        assert result == "/config/skills"
+
+    def test_config_path_expands_tilde(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=False,
+            config_skills_path="~/provider/skills",
+        )
+        assert result == os.path.expanduser("~/provider/skills")
+
+    def test_returns_none_when_nothing_configured(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=False,
+            config_skills_path=None,
+        )
+        assert result is None
+
+    def test_explicit_path_wins_over_none_config(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path="/explicit/path",
+            local=False,
+            config_skills_path=None,
+        )
+        assert result == "/explicit/path"
