@@ -1,5 +1,5 @@
 """
-Tests for scripts/generate_mirror.py
+Tests for skills/obscure-package-master/scripts/generate_mirror.py
 
 All external I/O (subprocess / pip download) is mocked so that the suite
 runs offline and on every major AI-agent provider environment (Claude,
@@ -51,7 +51,13 @@ requires_symlinks = pytest.mark.skipif(
 # Helpers – load the module under test without executing __main__
 # ---------------------------------------------------------------------------
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "generate_mirror.py"
+SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / "obscure-package-master"
+    / "scripts"
+    / "generate_mirror.py"
+)
 
 
 def _load_module():
