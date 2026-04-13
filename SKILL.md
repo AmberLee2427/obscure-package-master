@@ -37,21 +37,30 @@ When the trigger conditions are met, follow these steps to generate a grounded r
 
 This skill is designed to work with any AI agent provider that can execute Python scripts. The output location is configurable for each provider:
 
-| Provider   | Default skills path         | Auto-detected via env var(s)                              |
-|------------|-----------------------------|-----------------------------------------------------------|
-| Claude     | `~/.claude/skills`          | `ANTHROPIC_API_KEY`, `CLAUDE_API_KEY`                     |
-| Gemini     | `~/.gemini/skills`          | `GEMINI_API_KEY`, `GOOGLE_GENERATIVEAI_API_KEY`           |
-| Codex      | `~/.copilot/skills`         | `CODEX_API_KEY`, `GITHUB_COPILOT_TOKEN`                   |
-| Cursor     | `~/.cursor/skills`          | —                                                         |
-| OpenAI     | `~/.openai/skills`          | `OPENAI_API_KEY`                                          |
-| OpenClaw   | `~/.openclaw/skills`        | —                                                         |
-| Cline      | `~/.cline/skills`           | —                                                         |
+| Provider   | Default skills path         |
+|------------|-----------------------------|
+| Claude     | `~/.claude/skills`          |
+| Gemini     | `~/.gemini/skills`          |
+| Codex      | `~/.copilot/skills`         |
+| Cursor     | `~/.cursor/skills`          |
+| OpenAI     | `~/.openai/skills`          |
+| OpenClaw   | `~/.openclaw/skills`        |
+| Cline      | `~/.cline/skills`           |
 
 **Configuration priority** (highest wins):
 1. `AGENT_SKILLS_PATH` environment variable
 2. `skills_path` in `config.json`
-3. Provider-specific default (auto-detected or set via `provider` in `config.json` / `AGENT_PROVIDER` env var)
+3. Provider-specific default (auto-detected from the script's install path, or set explicitly via `provider` in `config.json` / `AGENT_PROVIDER` env var)
 4. `.skills/` in the current working directory
+
+### Environment variables read by the script
+
+| Variable | Purpose |
+|---|---|
+| `AGENT_PROVIDER` | Explicit provider selection (optional) |
+| `AGENT_SKILLS_PATH` | Explicit output path override (optional) |
+
+No API key or credential environment variables are read. Provider auto-detection works by comparing the script's installed path against the known provider defaults above—so it works with OAuth, API keys, or any other auth method equally well.
 
 Example `config.json` for explicit provider selection:
 ```json

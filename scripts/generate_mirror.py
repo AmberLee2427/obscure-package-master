@@ -64,6 +64,30 @@ def parse_file(file_path, package_root):
             
     return results
 
+def _safe_extract_tar(tar, path):
+    """Extract a tarfile archive while rejecting members that would escape *path*."""
+    real_path = os.path.realpath(path) + os.sep
+    safe_members = []
+    for member in tar.getmembers():
+        member_path = os.path.realpath(os.path.join(path, member.name))
+        if not member_path.startswith(real_path):
+            print(f"Warning: Skipping unsafe archive member: {member.name!r}")
+            continue
+        safe_members.append(member)
+    tar.extractall(path=path, members=safe_members)
+
+
+def _safe_extract_zip(zf, path):
+    """Extract a zipfile archive while rejecting members that would escape *path*."""
+    real_path = os.path.realpath(path) + os.sep
+    for name in zf.namelist():
+        member_path = os.path.realpath(os.path.join(path, name))
+        if not member_path.startswith(real_path):
+            print(f"Warning: Skipping unsafe archive member: {name!r}")
+            continue
+        zf.extract(name, path)
+
+
 def download_package(package, version, tmp_dir):
     print(f"Downloading {package}=={version}...")
     cmd = ["pip", "download", "--no-binary=:all:", f"{package}=={version}", "-d", tmp_dir]
@@ -88,10 +112,10 @@ def download_package(package, version, tmp_dir):
     
     if archive_path.endswith(".tar.gz") or archive_path.endswith(".tar.bz2"):
         with tarfile.open(archive_path) as tar:
-            tar.extractall(path=extract_path)
+            _safe_extract_tar(tar, extract_path)
     elif archive_path.endswith(".zip") or archive_path.endswith(".whl"):
         with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
+            _safe_extract_zip(zip_ref, extract_path)
             
     return extract_path
 
@@ -264,20 +288,34 @@ def generate_skill(package, version, grep_map, package_root, output_dir, use_sym
     print(f"Skill generated at: {skill_dir}")
     return skill_dir
 
-def detect_provider():
-    """Detect the active AI agent provider from well-known environment variables."""
-    # Explicit override always wins
+def detect_provider(provider_defaults=None, script_path=None):
+    """Detect the active AI agent provider without reading sensitive env vars.
+
+    Detection order:
+    1. ``AGENT_PROVIDER`` environment variable (explicit, purpose-built).
+    2. The directory the script is installed in — if it lives inside a known
+       provider's skills folder (e.g. ``~/.claude/skills/…``) the provider is
+       inferred from the path.  This works regardless of the authentication
+       method (API key, OAuth, etc.) and avoids touching any credentials.
+    3. Returns ``None`` if neither heuristic matches.
+    """
+    # Explicit override always wins; AGENT_PROVIDER is purpose-built and safe.
     if "AGENT_PROVIDER" in os.environ:
         return os.environ["AGENT_PROVIDER"].lower()
-    # Presence-based detection via provider-specific env vars
-    if "ANTHROPIC_API_KEY" in os.environ or "CLAUDE_API_KEY" in os.environ:
-        return "claude"
-    if "GEMINI_API_KEY" in os.environ or "GOOGLE_GENERATIVEAI_API_KEY" in os.environ:
-        return "gemini"
-    if "OPENAI_API_KEY" in os.environ:
-        return "openai"
-    if "CODEX_API_KEY" in os.environ or "GITHUB_COPILOT_TOKEN" in os.environ:
-        return "codex"
+
+    # Infer provider from the script's installed location.
+    # Expected layout: <skills_dir>/<skill_name>/scripts/generate_mirror.py
+    # → skills_dir is two levels above the scripts/ directory.
+    if provider_defaults is None:
+        provider_defaults = PROVIDER_DEFAULTS
+    if script_path is None:
+        script_path = os.path.abspath(__file__)
+
+    skills_dir = os.path.realpath(os.path.dirname(os.path.dirname(os.path.dirname(script_path))))
+    for provider, default_path in provider_defaults.items():
+        if skills_dir == os.path.realpath(os.path.expanduser(default_path)):
+            return provider
+
     return None
 
 
@@ -303,9 +341,9 @@ def get_config():
         except Exception as e:
             print(f"Warning: Could not read config.json: {e}")
 
-    # Resolve provider: env var detection takes priority over config file value
-    # (detect_provider() checks AGENT_PROVIDER first, then API-key env vars)
-    provider = detect_provider() or config.get("provider")
+    # Resolve provider: AGENT_PROVIDER env var and install-path detection,
+    # then fall back to the provider set in config.json.
+    provider = detect_provider(provider_defaults=config["provider_defaults"]) or config.get("provider")
     if provider:
         config["provider"] = provider
 

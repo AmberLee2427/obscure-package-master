@@ -335,41 +335,49 @@ class TestDetectProvider:
         clean_env.setenv("AGENT_PROVIDER", "Gemini")
         assert gm.detect_provider() == "gemini"
 
-    def test_anthropic_key(self, clean_env):
-        clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
-        assert gm.detect_provider() == "claude"
+    def test_no_hints_returns_none(self, clean_env, tmp_path):
+        # Script path inside a tmp dir that doesn't match any provider path
+        assert gm.detect_provider(script_path=str(tmp_path / "scripts" / "generate_mirror.py")) is None
 
-    def test_claude_key(self, clean_env):
-        clean_env.setenv("CLAUDE_API_KEY", "sk-test")
-        assert gm.detect_provider() == "claude"
+    def test_path_based_detection_claude(self, clean_env, tmp_path, monkeypatch):
+        """Script installed under ~/.claude/skills/<skill>/scripts/ → 'claude'."""
+        fake_skills = tmp_path / ".claude" / "skills"
+        fake_skills.mkdir(parents=True)
+        script = fake_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
+        defaults = {"claude": str(fake_skills)}
+        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == "claude"
 
-    def test_gemini_key(self, clean_env):
-        clean_env.setenv("GEMINI_API_KEY", "key")
-        assert gm.detect_provider() == "gemini"
+    def test_path_based_detection_openai(self, clean_env, tmp_path):
+        fake_skills = tmp_path / ".openai" / "skills"
+        fake_skills.mkdir(parents=True)
+        script = fake_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
+        defaults = {"openai": str(fake_skills)}
+        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == "openai"
 
-    def test_google_generativeai_key(self, clean_env):
-        clean_env.setenv("GOOGLE_GENERATIVEAI_API_KEY", "key")
-        assert gm.detect_provider() == "gemini"
+    def test_path_based_unrecognised_location_returns_none(self, clean_env, tmp_path):
+        script = tmp_path / "some" / "random" / "scripts" / "generate_mirror.py"
+        assert gm.detect_provider(provider_defaults=gm.PROVIDER_DEFAULTS, script_path=str(script)) is None
 
-    def test_openai_key(self, clean_env):
-        clean_env.setenv("OPENAI_API_KEY", "sk-test")
-        assert gm.detect_provider() == "openai"
-
-    def test_codex_key(self, clean_env):
-        clean_env.setenv("CODEX_API_KEY", "key")
-        assert gm.detect_provider() == "codex"
-
-    def test_copilot_token(self, clean_env):
-        clean_env.setenv("GITHUB_COPILOT_TOKEN", "ghp_token")
-        assert gm.detect_provider() == "codex"
-
-    def test_no_env_vars_returns_none(self, clean_env):
-        assert gm.detect_provider() is None
-
-    def test_explicit_overrides_api_key(self, clean_env):
+    def test_explicit_env_var_overrides_path(self, clean_env, tmp_path):
+        """AGENT_PROVIDER wins even when the path would suggest a different provider."""
         clean_env.setenv("AGENT_PROVIDER", "cursor")
-        clean_env.setenv("OPENAI_API_KEY", "sk-test")
-        assert gm.detect_provider() == "cursor"
+        fake_skills = tmp_path / ".openai" / "skills"
+        fake_skills.mkdir(parents=True)
+        script = fake_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
+        defaults = {"openai": str(fake_skills)}
+        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == "cursor"
+
+    def test_api_keys_are_never_read(self, clean_env):
+        """Setting provider API key vars must not affect the result."""
+        for var in (
+            "ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "GEMINI_API_KEY",
+            "GOOGLE_GENERATIVEAI_API_KEY", "OPENAI_API_KEY",
+            "CODEX_API_KEY", "GITHUB_COPILOT_TOKEN",
+        ):
+            clean_env.setenv(var, "sk-dummy")
+        # None of those should influence the outcome
+        result = gm.detect_provider(script_path="/tmp/nowhere/scripts/generate_mirror.py")
+        assert result is None
 
 
 # ===========================================================================
@@ -392,12 +400,20 @@ class TestGetConfigDefaultOnly:
         assert cfg.get("provider") is None
 
     def test_provider_env_var_sets_default_path(self, clean_env):
-        """Auto-detected provider with no config file → use provider default path."""
-        clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
+        """Explicit AGENT_PROVIDER env var → use provider default path."""
+        clean_env.setenv("AGENT_PROVIDER", "claude")
         with mock.patch("os.path.exists", return_value=False):
             cfg = gm.get_config()
         assert cfg["provider"] == "claude"
         assert cfg["skills_path"] == os.path.expanduser("~/.claude/skills")
+
+    def test_api_keys_do_not_affect_config(self, clean_env):
+        """API key env vars must never influence provider detection."""
+        clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
+        with mock.patch("os.path.exists", return_value=False):
+            cfg = gm.get_config()
+        assert cfg.get("provider") is None
+        assert cfg["skills_path"].endswith(".skills")
 
 
 class TestGetConfigFromFile:
@@ -582,21 +598,25 @@ class TestEndToEnd:
         path = gm.PROVIDER_DEFAULTS[provider]
         assert path and path.startswith("~"), f"Provider {provider!r} default path looks wrong: {path!r}"
 
-    @pytest.mark.parametrize(
-        "env_var, expected_provider",
-        [
-            ("ANTHROPIC_API_KEY", "claude"),
-            ("CLAUDE_API_KEY", "claude"),
-            ("GEMINI_API_KEY", "gemini"),
-            ("GOOGLE_GENERATIVEAI_API_KEY", "gemini"),
-            ("OPENAI_API_KEY", "openai"),
-            ("CODEX_API_KEY", "codex"),
-            ("GITHUB_COPILOT_TOKEN", "codex"),
-        ],
-    )
-    def test_provider_detection_parametrized(self, clean_env, env_var, expected_provider):
-        clean_env.setenv(env_var, "dummy-value")
-        assert gm.detect_provider() == expected_provider
+    @pytest.mark.parametrize("provider", list(gm.PROVIDER_DEFAULTS.keys()))
+    def test_path_based_detection_all_providers(self, clean_env, tmp_path, provider):
+        """Path-based detection works for every known provider."""
+        fake_skills = tmp_path / "skills"
+        fake_skills.mkdir()
+        script = fake_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
+        defaults = {provider: str(fake_skills)}
+        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == provider
+
+    def test_api_keys_never_influence_detection(self, clean_env):
+        """Setting provider API key vars must not affect detection results."""
+        for var in (
+            "ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "GEMINI_API_KEY",
+            "GOOGLE_GENERATIVEAI_API_KEY", "OPENAI_API_KEY",
+            "CODEX_API_KEY", "GITHUB_COPILOT_TOKEN",
+        ):
+            clean_env.setenv(var, "sk-dummy")
+        result = gm.detect_provider(script_path="/tmp/nowhere/scripts/generate_mirror.py")
+        assert result is None
 
 
 # ===========================================================================
