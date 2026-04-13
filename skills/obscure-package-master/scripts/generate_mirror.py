@@ -16,7 +16,6 @@ PROVIDER_DEFAULTS = {
     "gemini":   "~/.gemini/skills",
     "codex":    "~/.copilot/skills",
     "cursor":   "~/.cursor/skills",
-    "openai":   "~/.openai/skills",
     "openclaw": "~/.openclaw/skills",
     "cline":    "~/.cline/skills",
 }
@@ -236,12 +235,14 @@ def build_grep_map(package_root):
                 grep_map.extend(parse_file(file_path, package_root))
     return grep_map
 
-def _resolve_skills_dir(explicit_path, local, config_skills_path):
+def _resolve_skills_dir(explicit_path, local, config_skills_path, provider=None, provider_defaults=None):
     """Return the final output directory for the generated skill, or ``None``.
 
     Priority (highest first):
     1. *explicit_path* — a path supplied directly on the CLI.
-    2. *local* flag — installs directly into the current working directory.
+    2. *local* flag — installs into the project-local provider hidden directory
+       (e.g. ``./.claude/skills/``).  Requires *provider* and *provider_defaults*
+       to be supplied; returns ``None`` when they are absent.
     3. *config_skills_path* — whatever ``get_config()`` resolved (env var,
        config file, or provider default).  May be ``None`` if nothing was
        configured.
@@ -252,7 +253,13 @@ def _resolve_skills_dir(explicit_path, local, config_skills_path):
     if explicit_path is not None:
         return os.path.expanduser(explicit_path)
     if local:
-        return os.getcwd()
+        if provider and provider_defaults and provider in provider_defaults:
+            home = os.path.normpath(os.path.expanduser("~"))
+            global_path = os.path.normpath(os.path.expanduser(provider_defaults[provider]))
+            # Mirror the global path under CWD: ~/.claude/skills → <cwd>/.claude/skills
+            if global_path.startswith(home + os.sep):
+                return os.path.normpath(os.getcwd() + global_path[len(home):])
+        return None
     if config_skills_path is not None:
         return os.path.expanduser(config_skills_path)
     return None
@@ -321,9 +328,10 @@ def detect_provider(provider_defaults=None, script_path=None):
     Detection order:
     1. ``AGENT_PROVIDER`` environment variable (explicit, purpose-built).
     2. The directory the script is installed in — if it lives inside a known
-       provider's skills folder (e.g. ``~/.claude/skills/…``) the provider is
-       inferred from the path.  This works regardless of the authentication
-       method (API key, OAuth, etc.) and avoids touching any credentials.
+       provider's skills folder (e.g. ``~/.claude/skills/…`` or the project-local
+       equivalent ``./.claude/skills/…``) the provider is inferred from the path.
+       This works regardless of the authentication method (API key, OAuth, etc.)
+       and avoids touching any credentials.
     3. Returns ``None`` if neither heuristic matches.
     """
     # Explicit override always wins; AGENT_PROVIDER is purpose-built and safe.
@@ -343,9 +351,19 @@ def detect_provider(provider_defaults=None, script_path=None):
     skills_dir = os.path.normpath(
         os.path.dirname(os.path.dirname(os.path.dirname(script_path)))
     )
+    home = os.path.normpath(os.path.expanduser("~"))
+    cwd = os.getcwd()
     for provider, default_path in provider_defaults.items():
-        if skills_dir == os.path.normpath(os.path.expanduser(default_path)):
+        # Global install: compare against ~/.<provider>/skills
+        global_path = os.path.normpath(os.path.expanduser(default_path))
+        if skills_dir == global_path:
             return provider
+        # Local (project) install: same hidden directory but rooted at CWD
+        # e.g. ~/.claude/skills  →  <cwd>/.claude/skills
+        if global_path.startswith(home + os.sep):
+            local_path = os.path.normpath(cwd + global_path[len(home):])
+            if skills_dir == local_path:
+                return provider
 
     return None
 
@@ -428,17 +446,32 @@ if __name__ == "__main__":
     ver = args.version
 
     config = get_config()
-    skills_dir = _resolve_skills_dir(args.output_path, args.local, config.get("skills_path"))
+    skills_dir = _resolve_skills_dir(
+        args.output_path,
+        args.local,
+        config.get("skills_path"),
+        provider=config.get("provider"),
+        provider_defaults=config.get("provider_defaults"),
+    )
 
     if skills_dir is None:
-        print(
-            "Error: Could not determine an output directory.\n"
-            "Options:\n"
-            "  --local                   Install into the current working directory\n"
-            "  AGENT_SKILLS_PATH=<path>  Set via environment variable\n"
-            "  skills_path in config.json\n"
-            "  python3 generate_mirror.py <pkg> <ver> <output_path>"
-        )
+        if args.local:
+            print(
+                "Error: --local requires a detectable provider.\n"
+                "Set AGENT_PROVIDER or 'provider' in config.json so the script\n"
+                "knows which hidden directory to use (e.g., ./.claude/skills/).\n"
+                "Or supply an explicit output path:\n"
+                "  python3 generate_mirror.py <pkg> <ver> <output_path>"
+            )
+        else:
+            print(
+                "Error: Could not determine an output directory.\n"
+                "Options:\n"
+                "  --local                   Install into the project-local provider directory (requires detectable provider)\n"
+                "  AGENT_SKILLS_PATH=<path>  Set via environment variable\n"
+                "  skills_path in config.json\n"
+                "  python3 generate_mirror.py <pkg> <ver> <output_path>"
+            )
         sys.exit(1)
 
     # Check for a local installation before downloading

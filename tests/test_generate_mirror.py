@@ -353,12 +353,17 @@ class TestDetectProvider:
         defaults = {"claude": str(fake_skills)}
         assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == "claude"
 
-    def test_path_based_detection_openai(self, clean_env, tmp_path):
-        fake_skills = tmp_path / ".openai" / "skills"
-        fake_skills.mkdir(parents=True)
-        script = fake_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
-        defaults = {"openai": str(fake_skills)}
-        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == "openai"
+    def test_path_based_detection_local_install(self, clean_env, tmp_path, monkeypatch):
+        """Script in <cwd>/.claude/skills/<skill>/scripts/ is detected as 'claude'."""
+        monkeypatch.chdir(tmp_path)
+        # Local install places the skill under the CWD-relative provider hidden dir.
+        local_skills = tmp_path / ".claude" / "skills"
+        local_skills.mkdir(parents=True)
+        script = local_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
+        # Default points to the global path; detection must also match the local equivalent.
+        global_skills_path = os.path.normpath(os.path.join(os.path.expanduser("~"), ".claude", "skills"))
+        defaults = {"claude": global_skills_path}
+        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == "claude"
 
     def test_path_based_unrecognised_location_returns_none(self, clean_env, tmp_path):
         script = tmp_path / "some" / "random" / "scripts" / "generate_mirror.py"
@@ -913,25 +918,30 @@ class TestResolveSkillsDir:
         )
         assert result == os.path.expanduser("~/myskills")
 
-    def test_local_flag_returns_cwd(self, tmp_path, monkeypatch):
+    def test_local_flag_with_provider_returns_cwd_relative_path(self, tmp_path, monkeypatch):
+        """--local + known provider → project-local provider hidden directory."""
+        monkeypatch.chdir(tmp_path)
+        home = os.path.expanduser("~")
+        global_path = os.path.expanduser("~/.claude/skills")
+        expected = os.path.normpath(str(tmp_path) + global_path[len(home):])
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=True,
+            config_skills_path="/config/skills",
+            provider="claude",
+            provider_defaults={"claude": "~/.claude/skills"},
+        )
+        assert result == expected
+
+    def test_local_flag_without_provider_returns_none(self, tmp_path, monkeypatch):
+        """--local without a detectable provider returns None (caller must error)."""
         monkeypatch.chdir(tmp_path)
         result = gm._resolve_skills_dir(
             explicit_path=None,
             local=True,
             config_skills_path="/config/skills",
         )
-        assert result == str(tmp_path)
-
-    def test_local_flag_different_cwd(self, tmp_path, monkeypatch):
-        project = tmp_path / "myproject"
-        project.mkdir()
-        monkeypatch.chdir(project)
-        result = gm._resolve_skills_dir(
-            explicit_path=None,
-            local=True,
-            config_skills_path="/config/skills",
-        )
-        assert result == str(project)
+        assert result is None
 
     def test_config_path_used_when_no_override(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

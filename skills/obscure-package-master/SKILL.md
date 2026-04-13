@@ -23,7 +23,7 @@ When the trigger conditions are met, follow these steps to generate a grounded r
     # Install into the provider's global skills directory (auto-detected from install path):
     python3 <path_to_scripts>/generate_mirror.py <package> <version>
 
-    # Install into the current working directory (project-local):
+    # Install into the project's local provider skills directory (e.g., ./.claude/skills/):
     python3 <path_to_scripts>/generate_mirror.py <package> <version> --local
 
     # Install into an explicit directory:
@@ -42,24 +42,14 @@ When the trigger conditions are met, follow these steps to generate a grounded r
 
 ## Provider Compatibility
 
-This skill is designed to work with any AI agent provider that can execute Python scripts. The output location is configurable for each provider:
-
-| Provider   | Default skills path         |
-|------------|-----------------------------|
-| Claude     | `~/.claude/skills`          |
-| Gemini     | `~/.gemini/skills`          |
-| Codex      | `~/.copilot/skills`         |
-| Cursor     | `~/.cursor/skills`          |
-| OpenAI     | `~/.openai/skills`          |
-| OpenClaw   | `~/.openclaw/skills`        |
-| Cline      | `~/.cline/skills`           |
+This skill works with any AI agent provider that can execute Python scripts. The output location is determined automatically from the script's install path, or can be configured explicitly.
 
 **Output directory priority** (highest wins):
 1. Explicit `output_path` positional argument on the CLI
-2. `--local` CLI flag → current working directory
+2. `--local` CLI flag → project-local provider skills directory (e.g., `./.claude/skills/`)
 3. `AGENT_SKILLS_PATH` environment variable
 4. `skills_path` in `config.json`
-5. Provider-specific default (auto-detected from the script's install path, or set explicitly via `provider` in `config.json` / `AGENT_PROVIDER` env var)
+5. Provider-specific default (auto-detected from the script's install path — both `~/` and `./` roots are checked — or set explicitly via `provider` in `config.json` / `AGENT_PROVIDER` env var)
 
 If none of the above apply, the script exits with an error listing the available options.
 
@@ -70,7 +60,7 @@ If none of the above apply, the script exits with an error listing the available
 | `AGENT_PROVIDER` | Explicit provider selection (optional) |
 | `AGENT_SKILLS_PATH` | Explicit output path override (optional) |
 
-No API key or credential environment variables are read. Provider auto-detection works by comparing the script's installed path against the known provider defaults above—so it works with OAuth, API keys, or any other auth method equally well.
+No API key or credential environment variables are read. Provider auto-detection works by comparing the script's installed path against the known provider defaults—so it works with OAuth, API keys, or any other auth method equally well.
 
 Example `config.json` for explicit provider selection:
 ```json
