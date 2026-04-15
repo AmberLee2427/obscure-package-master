@@ -1,5 +1,5 @@
 """
-Tests for scripts/generate_mirror.py
+Tests for skills/obscure-package-master/scripts/generate_mirror.py
 
 All external I/O (subprocess / pip download) is mocked so that the suite
 runs offline and on every major AI-agent provider environment (Claude,
@@ -51,7 +51,13 @@ requires_symlinks = pytest.mark.skipif(
 # Helpers – load the module under test without executing __main__
 # ---------------------------------------------------------------------------
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "generate_mirror.py"
+SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / "obscure-package-master"
+    / "scripts"
+    / "generate_mirror.py"
+)
 
 
 def _load_module():
@@ -335,41 +341,54 @@ class TestDetectProvider:
         clean_env.setenv("AGENT_PROVIDER", "Gemini")
         assert gm.detect_provider() == "gemini"
 
-    def test_anthropic_key(self, clean_env):
-        clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
-        assert gm.detect_provider() == "claude"
+    def test_no_hints_returns_none(self, clean_env, tmp_path):
+        # Script path inside a tmp dir that doesn't match any provider path
+        assert gm.detect_provider(script_path=str(tmp_path / "scripts" / "generate_mirror.py")) is None
 
-    def test_claude_key(self, clean_env):
-        clean_env.setenv("CLAUDE_API_KEY", "sk-test")
-        assert gm.detect_provider() == "claude"
+    def test_path_based_detection_claude(self, clean_env, tmp_path, monkeypatch):
+        """Script installed under ~/.claude/skills/<skill>/scripts/ → 'claude'."""
+        fake_skills = tmp_path / ".claude" / "skills"
+        fake_skills.mkdir(parents=True)
+        script = fake_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
+        defaults = {"claude": str(fake_skills)}
+        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == "claude"
 
-    def test_gemini_key(self, clean_env):
-        clean_env.setenv("GEMINI_API_KEY", "key")
-        assert gm.detect_provider() == "gemini"
+    def test_path_based_detection_local_install(self, clean_env, tmp_path, monkeypatch):
+        """Script in <cwd>/.claude/skills/<skill>/scripts/ is detected as 'claude'."""
+        monkeypatch.chdir(tmp_path)
+        # Local install places the skill under the CWD-relative provider hidden dir.
+        local_skills = tmp_path / ".claude" / "skills"
+        local_skills.mkdir(parents=True)
+        script = local_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
+        # Default points to the global path; detection must also match the local equivalent.
+        global_skills_path = os.path.normpath(os.path.join(os.path.expanduser("~"), ".claude", "skills"))
+        defaults = {"claude": global_skills_path}
+        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == "claude"
 
-    def test_google_generativeai_key(self, clean_env):
-        clean_env.setenv("GOOGLE_GENERATIVEAI_API_KEY", "key")
-        assert gm.detect_provider() == "gemini"
+    def test_path_based_unrecognised_location_returns_none(self, clean_env, tmp_path):
+        script = tmp_path / "some" / "random" / "scripts" / "generate_mirror.py"
+        assert gm.detect_provider(provider_defaults=gm.PROVIDER_DEFAULTS, script_path=str(script)) is None
 
-    def test_openai_key(self, clean_env):
-        clean_env.setenv("OPENAI_API_KEY", "sk-test")
-        assert gm.detect_provider() == "openai"
-
-    def test_codex_key(self, clean_env):
-        clean_env.setenv("CODEX_API_KEY", "key")
-        assert gm.detect_provider() == "codex"
-
-    def test_copilot_token(self, clean_env):
-        clean_env.setenv("GITHUB_COPILOT_TOKEN", "ghp_token")
-        assert gm.detect_provider() == "codex"
-
-    def test_no_env_vars_returns_none(self, clean_env):
-        assert gm.detect_provider() is None
-
-    def test_explicit_overrides_api_key(self, clean_env):
+    def test_explicit_env_var_overrides_path(self, clean_env, tmp_path):
+        """AGENT_PROVIDER wins even when the path would suggest a different provider."""
         clean_env.setenv("AGENT_PROVIDER", "cursor")
-        clean_env.setenv("OPENAI_API_KEY", "sk-test")
-        assert gm.detect_provider() == "cursor"
+        fake_skills = tmp_path / ".openai" / "skills"
+        fake_skills.mkdir(parents=True)
+        script = fake_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
+        defaults = {"openai": str(fake_skills)}
+        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == "cursor"
+
+    def test_api_keys_are_never_read(self, clean_env):
+        """Setting provider API key vars must not affect the result."""
+        for var in (
+            "ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "GEMINI_API_KEY",
+            "GOOGLE_GENERATIVEAI_API_KEY", "OPENAI_API_KEY",
+            "CODEX_API_KEY", "GITHUB_COPILOT_TOKEN",
+        ):
+            clean_env.setenv(var, "sk-dummy")
+        # None of those should influence the outcome
+        result = gm.detect_provider(script_path="/tmp/nowhere/scripts/generate_mirror.py")
+        assert result is None
 
 
 # ===========================================================================
@@ -379,12 +398,13 @@ class TestDetectProvider:
 class TestGetConfigDefaultOnly:
     """No config file, no env vars → defaults."""
 
-    def test_skills_path_defaults_to_dotskills(self, clean_env, tmp_path, monkeypatch):
-        # Point script dir to a tmpdir so no config.json is found
+    def test_skills_path_absent_when_no_hints(self, clean_env, tmp_path, monkeypatch):
+        # Point script dir to a tmpdir so no config.json is found and no
+        # provider path is matched.
         monkeypatch.setattr(gm, "__file__", str(tmp_path / "scripts" / "generate_mirror.py"))
         with mock.patch("os.path.exists", return_value=False):
             cfg = gm.get_config()
-        assert cfg["skills_path"].endswith(".skills")
+        assert "skills_path" not in cfg
 
     def test_provider_is_none_without_hints(self, clean_env, tmp_path):
         with mock.patch("os.path.exists", return_value=False):
@@ -392,12 +412,20 @@ class TestGetConfigDefaultOnly:
         assert cfg.get("provider") is None
 
     def test_provider_env_var_sets_default_path(self, clean_env):
-        """Auto-detected provider with no config file → use provider default path."""
-        clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
+        """Explicit AGENT_PROVIDER env var → use provider default path."""
+        clean_env.setenv("AGENT_PROVIDER", "claude")
         with mock.patch("os.path.exists", return_value=False):
             cfg = gm.get_config()
         assert cfg["provider"] == "claude"
         assert cfg["skills_path"] == os.path.expanduser("~/.claude/skills")
+
+    def test_api_keys_do_not_affect_config(self, clean_env):
+        """API key env vars must never influence provider detection."""
+        clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
+        with mock.patch("os.path.exists", return_value=False):
+            cfg = gm.get_config()
+        assert cfg.get("provider") is None
+        assert "skills_path" not in cfg
 
 
 class TestGetConfigFromFile:
@@ -582,21 +610,25 @@ class TestEndToEnd:
         path = gm.PROVIDER_DEFAULTS[provider]
         assert path and path.startswith("~"), f"Provider {provider!r} default path looks wrong: {path!r}"
 
-    @pytest.mark.parametrize(
-        "env_var, expected_provider",
-        [
-            ("ANTHROPIC_API_KEY", "claude"),
-            ("CLAUDE_API_KEY", "claude"),
-            ("GEMINI_API_KEY", "gemini"),
-            ("GOOGLE_GENERATIVEAI_API_KEY", "gemini"),
-            ("OPENAI_API_KEY", "openai"),
-            ("CODEX_API_KEY", "codex"),
-            ("GITHUB_COPILOT_TOKEN", "codex"),
-        ],
-    )
-    def test_provider_detection_parametrized(self, clean_env, env_var, expected_provider):
-        clean_env.setenv(env_var, "dummy-value")
-        assert gm.detect_provider() == expected_provider
+    @pytest.mark.parametrize("provider", list(gm.PROVIDER_DEFAULTS.keys()))
+    def test_path_based_detection_all_providers(self, clean_env, tmp_path, provider):
+        """Path-based detection works for every known provider."""
+        fake_skills = tmp_path / "skills"
+        fake_skills.mkdir()
+        script = fake_skills / "obscure-package-master" / "scripts" / "generate_mirror.py"
+        defaults = {provider: str(fake_skills)}
+        assert gm.detect_provider(provider_defaults=defaults, script_path=str(script)) == provider
+
+    def test_api_keys_never_influence_detection(self, clean_env):
+        """Setting provider API key vars must not affect detection results."""
+        for var in (
+            "ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "GEMINI_API_KEY",
+            "GOOGLE_GENERATIVEAI_API_KEY", "OPENAI_API_KEY",
+            "CODEX_API_KEY", "GITHUB_COPILOT_TOKEN",
+        ):
+            clean_env.setenv(var, "sk-dummy")
+        result = gm.detect_provider(script_path="/tmp/nowhere/scripts/generate_mirror.py")
+        assert result is None
 
 
 # ===========================================================================
@@ -791,3 +823,186 @@ class TestGenerateSkillSymlinks:
         assert ref_init.is_file()
         assert not ref_init.is_symlink()
         assert ref_init.read_text() == (tmp_pkg / "__init__.py").read_text()
+
+
+# ===========================================================================
+# 13. Safe archive extraction helpers
+# ===========================================================================
+
+class TestSafeExtractTar:
+    def _make_legit_tar(self, tmp_path):
+        src = tmp_path / "pkg" / "__init__.py"
+        src.parent.mkdir(parents=True)
+        src.write_text("# safe")
+        tb = tmp_path / "legit.tar.gz"
+        with tarfile.open(str(tb), "w:gz") as tar:
+            tar.add(str(src.parent), arcname="pkg")
+        return tb
+
+    def test_extracts_safe_members(self, tmp_path):
+        tb = self._make_legit_tar(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        with tarfile.open(str(tb)) as tar:
+            gm._safe_extract_tar(tar, str(out))
+        assert (out / "pkg" / "__init__.py").is_file()
+
+    def test_skips_path_traversal_members(self, tmp_path, capsys):
+        import io
+        tb_path = tmp_path / "evil.tar.gz"
+        with tarfile.open(str(tb_path), "w:gz") as tar:
+            info = tarfile.TarInfo(name="../../evil.txt")
+            content = b"evil"
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        out = tmp_path / "out"
+        out.mkdir()
+        with tarfile.open(str(tb_path)) as tar:
+            gm._safe_extract_tar(tar, str(out))
+        assert not (tmp_path / "evil.txt").exists()
+        assert "Skipping" in capsys.readouterr().out
+
+    def test_skips_symlink_members(self, tmp_path, capsys):
+        tb_path = tmp_path / "sym.tar.gz"
+        with tarfile.open(str(tb_path), "w:gz") as tar:
+            info = tarfile.TarInfo(name="link")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+        out = tmp_path / "out"
+        out.mkdir()
+        with tarfile.open(str(tb_path)) as tar:
+            gm._safe_extract_tar(tar, str(out))
+        assert not (out / "link").exists()
+        assert "Skipping" in capsys.readouterr().out
+
+    def test_skips_hardlink_members(self, tmp_path, capsys):
+        tb_path = tmp_path / "hard.tar.gz"
+        with tarfile.open(str(tb_path), "w:gz") as tar:
+            info = tarfile.TarInfo(name="hardlink")
+            info.type = tarfile.LNKTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+        out = tmp_path / "out"
+        out.mkdir()
+        with tarfile.open(str(tb_path)) as tar:
+            gm._safe_extract_tar(tar, str(out))
+        assert not (out / "hardlink").exists()
+        assert "Skipping" in capsys.readouterr().out
+
+
+class TestSafeExtractZip:
+    def _make_legit_zip(self, tmp_path):
+        import zipfile as zf
+        zp = tmp_path / "legit.zip"
+        with zf.ZipFile(str(zp), "w") as z:
+            z.writestr("pkg/__init__.py", "# safe")
+        return zp
+
+    def test_extracts_safe_members(self, tmp_path):
+        import zipfile as zf
+        zp = self._make_legit_zip(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        with zf.ZipFile(str(zp)) as z:
+            gm._safe_extract_zip(z, str(out))
+        assert (out / "pkg" / "__init__.py").is_file()
+
+    def test_skips_path_traversal_members(self, tmp_path, capsys):
+        import zipfile as zf
+        zp = tmp_path / "evil.zip"
+        with zf.ZipFile(str(zp), "w") as z:
+            z.writestr("../../evil.txt", "evil")
+        out = tmp_path / "out"
+        out.mkdir()
+        with zf.ZipFile(str(zp)) as z:
+            gm._safe_extract_zip(z, str(out))
+        assert not (tmp_path / "evil.txt").exists()
+        assert "Skipping" in capsys.readouterr().out
+
+
+# ===========================================================================
+# 14. _resolve_skills_dir
+# ===========================================================================
+
+class TestResolveSkillsDir:
+    """Unit tests for the output-directory priority logic."""
+
+    def test_explicit_path_wins_over_everything(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path="/explicit/skills",
+            local=True,
+            config_skills_path="/config/skills",
+        )
+        assert result == "/explicit/skills"
+
+    def test_explicit_path_expands_tilde(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path="~/myskills",
+            local=False,
+            config_skills_path="/config/skills",
+        )
+        assert result == os.path.expanduser("~/myskills")
+
+    def test_local_flag_with_provider_returns_cwd_relative_path(self, tmp_path, monkeypatch):
+        """--local + known provider → project-local provider hidden directory."""
+        monkeypatch.chdir(tmp_path)
+        home = os.path.expanduser("~")
+        global_path = os.path.expanduser("~/.claude/skills")
+        expected = os.path.normpath(str(tmp_path) + global_path[len(home):])
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=True,
+            config_skills_path="/config/skills",
+            provider="claude",
+            provider_defaults={"claude": "~/.claude/skills"},
+        )
+        assert result == expected
+
+    def test_local_flag_without_provider_returns_none(self, tmp_path, monkeypatch):
+        """--local without a detectable provider returns None (caller must error)."""
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=True,
+            config_skills_path="/config/skills",
+        )
+        assert result is None
+
+    def test_config_path_used_when_no_override(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=False,
+            config_skills_path="/config/skills",
+        )
+        assert result == "/config/skills"
+
+    def test_config_path_expands_tilde(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=False,
+            config_skills_path="~/provider/skills",
+        )
+        assert result == os.path.expanduser("~/provider/skills")
+
+    def test_returns_none_when_nothing_configured(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path=None,
+            local=False,
+            config_skills_path=None,
+        )
+        assert result is None
+
+    def test_explicit_path_wins_over_none_config(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = gm._resolve_skills_dir(
+            explicit_path="/explicit/path",
+            local=False,
+            config_skills_path=None,
+        )
+        assert result == "/explicit/path"

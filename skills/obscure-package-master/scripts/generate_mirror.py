@@ -14,9 +14,8 @@ import site
 PROVIDER_DEFAULTS = {
     "claude":   "~/.claude/skills",
     "gemini":   "~/.gemini/skills",
-    "codex":    "~/.copilot/skills",
+    "codex":    "~/.codex/skills",
     "cursor":   "~/.cursor/skills",
-    "openai":   "~/.openai/skills",
     "openclaw": "~/.openclaw/skills",
     "cline":    "~/.cline/skills",
 }
@@ -64,6 +63,50 @@ def parse_file(file_path, package_root):
             
     return results
 
+def _safe_extract_tar(tar, path):
+    """Extract a tarfile archive while rejecting members that would escape *path*.
+
+    On Python 3.12+ the ``filter='data'`` argument is passed to
+    ``extractall()``, which causes the tarfile module itself to block
+    symlinks, hardlinks, and device files.  On older Python versions we
+    perform the same checks manually so that the classic symlink-chaining
+    attack (create a symlink inside the target dir, then write a subsequent
+    member through it to a path outside the target) is prevented.
+    """
+    real_path = os.path.realpath(path) + os.sep
+    safe_members = []
+    for member in tar.getmembers():
+        # Always reject non-regular-file types on Python <3.12 (filter='data'
+        # handles this on 3.12+).  A symlink or hardlink in the archive can
+        # point outside the target directory; a device file should never appear
+        # in a source distribution.
+        if member.issym() or member.islnk() or member.isdev():
+            print(f"Warning: Skipping non-regular archive member: {member.name!r}")
+            continue
+        member_path = os.path.realpath(os.path.join(path, member.name))
+        if not member_path.startswith(real_path):
+            print(f"Warning: Skipping unsafe archive member: {member.name!r}")
+            continue
+        safe_members.append(member)
+    # Pass filter='data' when available (Python 3.12+) to suppress the
+    # DeprecationWarning about unfiltered extraction in future Python versions.
+    try:
+        tar.extractall(path=path, members=safe_members, filter="data")
+    except TypeError:
+        tar.extractall(path=path, members=safe_members)
+
+
+def _safe_extract_zip(zf, path):
+    """Extract a zipfile archive while rejecting members that would escape *path*."""
+    real_path = os.path.realpath(path) + os.sep
+    for name in zf.namelist():
+        member_path = os.path.realpath(os.path.join(path, name))
+        if not member_path.startswith(real_path):
+            print(f"Warning: Skipping unsafe archive member: {name!r}")
+            continue
+        zf.extract(name, path)
+
+
 def download_package(package, version, tmp_dir):
     print(f"Downloading {package}=={version}...")
     cmd = ["pip", "download", "--no-binary=:all:", f"{package}=={version}", "-d", tmp_dir]
@@ -88,10 +131,10 @@ def download_package(package, version, tmp_dir):
     
     if archive_path.endswith(".tar.gz") or archive_path.endswith(".tar.bz2"):
         with tarfile.open(archive_path) as tar:
-            tar.extractall(path=extract_path)
+            _safe_extract_tar(tar, extract_path)
     elif archive_path.endswith(".zip") or archive_path.endswith(".whl"):
         with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
+            _safe_extract_zip(zip_ref, extract_path)
             
     return extract_path
 
@@ -207,6 +250,36 @@ def build_grep_map(package_root):
                 grep_map.extend(parse_file(file_path, package_root))
     return grep_map
 
+def _resolve_skills_dir(explicit_path, local, config_skills_path, provider=None, provider_defaults=None):
+    """Return the final output directory for the generated skill, or ``None``.
+
+    Priority (highest first):
+    1. *explicit_path* — a path supplied directly on the CLI.
+    2. *local* flag — installs into the project-local provider hidden directory
+       (e.g. ``./.claude/skills/``).  Requires *provider* and *provider_defaults*
+       to be supplied; returns ``None`` when they are absent.
+    3. *config_skills_path* — whatever ``get_config()`` resolved (env var,
+       config file, or provider default).  May be ``None`` if nothing was
+       configured.
+
+    Returns ``None`` when no directory could be determined; the caller is
+    responsible for reporting an error in that case.
+    """
+    if explicit_path is not None:
+        return os.path.expanduser(explicit_path)
+    if local:
+        if provider and provider_defaults and provider in provider_defaults:
+            home = os.path.normpath(os.path.expanduser("~"))
+            global_path = os.path.normpath(os.path.expanduser(provider_defaults[provider]))
+            # Mirror the global path under CWD: ~/.claude/skills → <cwd>/.claude/skills
+            if global_path.startswith(home + os.sep):
+                return os.path.normpath(os.getcwd() + global_path[len(home):])
+        return None
+    if config_skills_path is not None:
+        return os.path.expanduser(config_skills_path)
+    return None
+
+
 def generate_skill(package, version, grep_map, package_root, output_dir, use_symlinks=False):
     skill_name = f"{package}-{version}".lower().replace("_", "-")
     skill_dir = os.path.join(output_dir, skill_name)
@@ -264,26 +337,56 @@ def generate_skill(package, version, grep_map, package_root, output_dir, use_sym
     print(f"Skill generated at: {skill_dir}")
     return skill_dir
 
-def detect_provider():
-    """Detect the active AI agent provider from well-known environment variables."""
-    # Explicit override always wins
+def detect_provider(provider_defaults=None, script_path=None):
+    """Detect the active AI agent provider without reading sensitive env vars.
+
+    Detection order:
+    1. ``AGENT_PROVIDER`` environment variable (explicit, purpose-built).
+    2. The directory the script is installed in — if it lives inside a known
+       provider's skills folder (e.g. ``~/.claude/skills/…`` or the project-local
+       equivalent ``./.claude/skills/…``) the provider is inferred from the path.
+       This works regardless of the authentication method (API key, OAuth, etc.)
+       and avoids touching any credentials.
+    3. Returns ``None`` if neither heuristic matches.
+    """
+    # Explicit override always wins; AGENT_PROVIDER is purpose-built and safe.
     if "AGENT_PROVIDER" in os.environ:
         return os.environ["AGENT_PROVIDER"].lower()
-    # Presence-based detection via provider-specific env vars
-    if "ANTHROPIC_API_KEY" in os.environ or "CLAUDE_API_KEY" in os.environ:
-        return "claude"
-    if "GEMINI_API_KEY" in os.environ or "GOOGLE_GENERATIVEAI_API_KEY" in os.environ:
-        return "gemini"
-    if "OPENAI_API_KEY" in os.environ:
-        return "openai"
-    if "CODEX_API_KEY" in os.environ or "GITHUB_COPILOT_TOKEN" in os.environ:
-        return "codex"
+
+    # Infer provider from the script's installed location.
+    # Expected layout: <skills_dir>/<skill_name>/scripts/generate_mirror.py
+    # → skills_dir is two levels above the scripts/ directory.
+    if provider_defaults is None:
+        provider_defaults = PROVIDER_DEFAULTS
+    if script_path is None:
+        script_path = os.path.abspath(__file__)
+
+    # Use normpath (not realpath) to canonicalise — realpath calls abspath
+    # internally which can interfere with test mocking.
+    skills_dir = os.path.normpath(
+        os.path.dirname(os.path.dirname(os.path.dirname(script_path)))
+    )
+    home = os.path.normpath(os.path.expanduser("~"))
+    cwd = os.getcwd()
+    for provider, default_path in provider_defaults.items():
+        # Global install: compare against ~/.<provider>/skills
+        global_path = os.path.normpath(os.path.expanduser(default_path))
+        if skills_dir == global_path:
+            return provider
+        # Local (project) install: same hidden directory but rooted at CWD
+        # e.g. ~/.claude/skills  →  <cwd>/.claude/skills
+        if global_path.startswith(home + os.sep):
+            local_path = os.path.normpath(cwd + global_path[len(home):])
+            if skills_dir == local_path:
+                return provider
+
     return None
 
 
 def get_config():
-    # Try to load config from the script's directory
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Compute script path once so detect_provider uses the same value.
+    script_path = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_path)
     config_path = os.path.join(os.path.dirname(script_dir), "config.json")
 
     config = {
@@ -303,9 +406,12 @@ def get_config():
         except Exception as e:
             print(f"Warning: Could not read config.json: {e}")
 
-    # Resolve provider: env var detection takes priority over config file value
-    # (detect_provider() checks AGENT_PROVIDER first, then API-key env vars)
-    provider = detect_provider() or config.get("provider")
+    # Resolve provider: AGENT_PROVIDER env var and install-path detection,
+    # then fall back to the provider set in config.json.
+    provider = detect_provider(
+        provider_defaults=config["provider_defaults"],
+        script_path=script_path,
+    ) or config.get("provider")
     if provider:
         config["provider"] = provider
 
@@ -314,9 +420,7 @@ def get_config():
     if provider and provider in config["provider_defaults"] and not explicit_path_in_config:
         config["skills_path"] = os.path.expanduser(config["provider_defaults"][provider])
 
-    # Fall back to CWD .skills/ if still no path was determined
-    if "skills_path" not in config:
-        config["skills_path"] = os.path.join(os.getcwd(), ".skills")
+    # If no skills_path was determined, leave it absent — callers must handle this.
 
     # Environment variable override – highest priority
     if "AGENT_SKILLS_PATH" in os.environ:
@@ -325,23 +429,67 @@ def get_config():
     return config
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python3 generate_mirror.py <package> <version> [output_path]")
-        sys.exit(1)
-        
-    pkg = sys.argv[1]
-    ver = sys.argv[2]
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="generate_mirror.py",
+        description="Generate a local grep-map skill for a PyPI package.",
+    )
+    parser.add_argument("package", help="PyPI package name")
+    parser.add_argument("version", help="Package version (e.g. 1.2.3)")
+    parser.add_argument(
+        "output_path",
+        nargs="?",
+        default=None,
+        help=(
+            "Explicit output directory for the skill. "
+            "Overrides --local, config, and provider auto-detection."
+        ),
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help=(
+            "Install the skill into the project-local provider hidden directory "
+            "(e.g. ./.claude/skills/ for Claude). "
+            "Requires a detectable provider via AGENT_PROVIDER, config.json, "
+            "or the script's own install path. "
+            "Use an explicit output_path instead if no provider is configured."
+        ),
+    )
+    args = parser.parse_args()
+
+    pkg = args.package
+    ver = args.version
+
     config = get_config()
-    
-    # Priority: 1. CLI Arg, 2. Env Var/Config, 3. Default (.skills/)
-    if len(sys.argv) >= 4:
-        skills_dir = sys.argv[3]
-    else:
-        skills_dir = config["skills_path"]
-        
-    # Expand ~ in paths
-    skills_dir = os.path.expanduser(skills_dir)
+    skills_dir = _resolve_skills_dir(
+        args.output_path,
+        args.local,
+        config.get("skills_path"),
+        provider=config.get("provider"),
+        provider_defaults=config.get("provider_defaults"),
+    )
+
+    if skills_dir is None:
+        if args.local:
+            print(
+                "Error: --local requires a detectable provider.\n"
+                "Set AGENT_PROVIDER or 'provider' in config.json so the script\n"
+                "knows which hidden directory to use (e.g., ./.claude/skills/).\n"
+                "Or supply an explicit output path:\n"
+                "  python3 generate_mirror.py <pkg> <ver> <output_path>"
+            )
+        else:
+            print(
+                "Error: Could not determine an output directory.\n"
+                "Options:\n"
+                "  --local                   Install into the project-local provider directory (requires detectable provider)\n"
+                "  AGENT_SKILLS_PATH=<path>  Set via environment variable\n"
+                "  skills_path in config.json\n"
+                "  python3 generate_mirror.py <pkg> <ver> <output_path>"
+            )
+        sys.exit(1)
 
     # Check for a local installation before downloading
     print(f"Checking for local installation of {pkg}=={ver}...")
